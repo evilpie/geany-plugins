@@ -108,51 +108,246 @@ enum {
   COL_COUNT
 };
 
-
-#define SEPARATORS        " -_/\\\"'"
-#define IS_SEPARATOR(c)   (strchr (SEPARATORS, (c)))
-#define next_separator(p) (strpbrk (p, SEPARATORS))
-
-/* TODO: be more tolerant regarding unmatched character in the needle.
- * Right now, we implicitly accept unmatched characters at the end of the
- * needle but absolutely not at the start.  e.g. "xpy" won't match "python" at
- * all, though "pyx" will. */
-static inline gint
-get_score (const gchar *needle,
-           const gchar *haystack)
+static gboolean
+is_subset (const gchar *needle, const gchar *haystack)
 {
-  if (needle == NULL || haystack == NULL ||
-      *needle == '\0' || *haystack == '\0') {
-    return 0;
-  }
-  
-  if (IS_SEPARATOR (*haystack)) {
-    return get_score (needle, haystack + 1);
-  }
-
-  if (IS_SEPARATOR (*needle)) {
-    return get_score (needle + 1, next_separator (haystack));
+  size_t n = 0, m = 0;
+  while(n < strlen(needle) && m < strlen(haystack))
+  {
+    if(needle[n] == haystack[m] || toupper(needle[n]) == haystack[m])
+      ++n;
+    ++m;
   }
 
-  if (*needle == *haystack) {
-    gint a = get_score (needle + 1, haystack + 1) + 1;
-    gint b = get_score (needle, next_separator (haystack));
-    
-    return MAX (a, b);
-  } else {
-    return get_score (needle, next_separator (haystack));
-  }
+  return n == strlen(needle);
 }
 
-static gint
+static void
+print_matrix (size_t* matrix, size_t n, size_t m, const gchar *rowLabel, const gchar *colLabel)
+{
+  size_t i, j;
+  fprintf(stderr, "   |");
+  for(j = 0; j < m; ++j)
+    fprintf(stderr, "%3c", colLabel[j]);
+  fprintf(stderr, "\n");
+
+  fprintf(stderr, "---+");
+  for(j = 0; j < m; ++j)
+    fprintf(stderr, "---");
+  fprintf(stderr, "\n");
+
+  for(i = 0; i < n; ++i)
+  {
+    fprintf(stderr, " %c |", rowLabel[i]);
+    for(j = 0; j < m; ++j)
+    {
+      fprintf(stderr, "%3zu", matrix[i*m + j]);
+    }
+    fprintf(stderr, "\n");
+  }
+  fprintf(stderr, "\n");
+}
+
+static double
+calculate_rank (const gchar *lhs, const gchar *rhs)
+{
+  size_t const n = strlen(lhs);
+  size_t const m = strlen(rhs);
+  size_t matrix[n][m], first[n], last[n];
+  gboolean capitals[m];
+  gboolean at_bow;
+  size_t i, j, k;
+  gchar ch;
+  size_t capitalsTouched;
+  size_t substrings;
+  size_t prefixSize;
+  size_t bestJIndex;
+  size_t bestJLength;
+  size_t len;
+  gboolean foundCapital;
+  size_t totalCapitals;
+  double score;
+  double denom;
+  size_t bound;
+
+
+  //bzero(matrix, sizeof(matrix));
+
+  memset(matrix, 0, sizeof(matrix));
+
+  //std::fill_n(&first[0], n, m);
+  //std::fill_n(&last[0],  n, 0);
+
+  for (i = 0; i < n; i++) {
+    first[i] = m;
+    last[i] = 0;
+  }
+
+  at_bow = TRUE;
+  for(i = 0; i < m; ++i)
+  {
+    ch = rhs[i];
+    capitals[i] = at_bow && isalnum(ch) || isupper(ch);
+    at_bow = !isalnum(ch) && ch != '\'' && ch != '.';
+  }
+
+  for(i = 0; i < n; ++i)
+  {
+    j = i == 0 ? 0 : first[i-1] + 1;
+    for(; j < m; ++j)
+    {
+      if(tolower(lhs[i]) == tolower(rhs[j]))
+      {
+        matrix[i][j] = i == 0 || j == 0 ? 1 : matrix[i-1][j-1] + 1;
+        first[i]     = j < first[i] ? j : first[i];
+        last[i]      = (j+1) > last[i] ? (j+1) : last[i];
+      }
+    }
+  }
+
+  for(i = n-1; i > 0; --i)
+  {
+    bound = last[i]-1;
+    if(bound < last[i-1])
+    {
+      while(first[i-1] < bound && matrix[i-1][bound-1] == 0)
+        --bound;
+      last[i-1] = bound;
+    }
+  }
+
+  for(i = n-1; i > 0; --i)
+  {
+    for(j = first[i]; j < last[i]; ++j)
+    {
+      if(matrix[i][j] && matrix[i-1][j-1])
+        matrix[i-1][j-1] = matrix[i][j];
+    }
+  }
+
+  for(i = 0; i < n; ++i)
+  {
+    for(j = first[i]; j < last[i]; ++j)
+    {
+      if(matrix[i][j] > 1 && i+1 < n && j+1 < m)
+        matrix[i+1][j+1] = matrix[i][j] - 1;
+    }
+  }
+
+  // print_matrix(&matrix[0][0], n, m, lhs, rhs);
+
+  // =========================
+  // = Greedy walk of Matrix =
+  // =========================
+
+  capitalsTouched = 0; // 0-n
+  substrings = 0;      // 1-n
+  prefixSize = 0;      // 0-m
+
+  i = 0;
+  while(i < n)
+  {
+    bestJIndex = 0;
+    bestJLength = 0;
+    for(j = first[i]; j < last[i]; ++j)
+    {
+      if(matrix[i][j] && capitals[j])
+      {
+        bestJIndex = j;
+        bestJLength = matrix[i][j];
+
+        for(k = j; k < j + bestJLength; ++k)
+          capitalsTouched += capitals[k] ? 1 : 0;
+
+        break;
+      }
+      else if(bestJLength < matrix[i][j])
+      {
+        bestJIndex = j;
+        bestJLength = matrix[i][j];
+      }
+    }
+
+    if (i == 0)
+      prefixSize = bestJIndex;
+
+    len = 0;
+    foundCapital = FALSE;
+    do {
+
+      ++i; ++len;
+      first[i] = (bestJIndex + len) > first[i] ? (bestJIndex + len) : first[i];
+      if(len < bestJLength && n < 4)
+      {
+        if(capitals[first[i]])
+          continue;
+
+        for(j = first[i]; j < last[i] && !foundCapital; ++j)
+        {
+          if(matrix[i][j] && capitals[j])
+            foundCapital = TRUE;
+        }
+      }
+
+    } while(len < bestJLength && !foundCapital);
+
+    ++substrings;
+  }
+
+  // ================================
+  // = Calculate rank based on walk =
+  // ================================
+
+  totalCapitals = 0;
+  for (i = 0; i < m; i++) {
+    if (capitals[i])
+      totalCapitals++;
+  }
+  score = 0.0;
+  denom = n*(n+1) + 1;
+  if(n == capitalsTouched)
+  {
+    score = (denom - 1) / denom;
+  }
+  else
+  {
+    score = (denom - (substrings * n + (n - capitalsTouched))) / denom;
+  }
+  score += (m - prefixSize) / (double)m / (2*denom);
+  score += capitalsTouched / (double)totalCapitals / (4*denom);
+  score += n / (double)m / (8*denom);
+
+  printf("‘%s’ ⊂ ‘%s’: %.3f\n", lhs, rhs, score);
+  return score;
+}
+
+double
+rank(const gchar *filter, const gchar *candidate)
+{
+  if (strlen(filter) == 0) {
+    return 1;
+  }
+
+  if (!is_subset(filter, candidate)) {
+    return 0;
+  }
+
+  if (strcmp(filter, candidate) == 0) {
+    return 1;
+  }
+
+  return calculate_rank(filter, candidate);
+}
+
+static double
 key_score (const gchar *key_,
            const gchar *text_)
 {
   gchar  *text  = g_utf8_casefold (text_, -1);
   gchar  *key   = g_utf8_casefold (key_, -1);
-  gint    score;
+  double    score;
   
-  score = get_score (key, text);
+  score = rank (key, text);
   
   g_free (text);
   g_free (key);
@@ -370,7 +565,7 @@ find_menubar (GtkContainer *container)
   
   return menubar;
 }
-
+  
 static void
 fill_store (GtkListStore *store)
 {
@@ -406,8 +601,8 @@ sort_func (GtkTreeModel  *model,
            GtkTreeIter   *b,
            gpointer       dummy)
 {
-  gint          scorea;
-  gint          scoreb;
+  double        scorea;
+  double        scoreb;
   gchar        *patha;
   gchar        *pathb;
   gint          typea;
@@ -421,17 +616,26 @@ sort_func (GtkTreeModel  *model,
   scorea = key_score (key, patha);
   scoreb = key_score (key, pathb);
   
-  if (! (typea & type)) {
-    scorea -= 0xf000;
-  }
-  if (! (typeb & type)) {
-    scoreb -= 0xf000;
-  }
+  // if (! (typea & type)) {
+  //   scorea -= 0.5;
+  // }
+  // if (! (typeb & type)) {
+  //   scoreb -= 0.5; // untested
+  // }
   
   g_free (patha);
   g_free (pathb);
   
-  return scoreb - scorea;
+
+  if (scorea == scoreb) {
+    return 0;
+  }
+
+  if (scorea > scoreb) {
+    return -1;
+  }
+
+  return +1;
 }
 
 static gboolean
@@ -441,7 +645,6 @@ on_panel_key_press_event (GtkWidget    *widget,
 {
   switch (event->keyval) {
     case GDK_KEY_Escape:
-      gtk_widget_hide (widget);
       return TRUE;
     
     case GDK_KEY_Tab:
@@ -661,7 +864,7 @@ create_panel (void)
   
   gtk_widget_show_all (frame);
 }
-
+  
 static void
 on_kb_show_panel (guint key_id)
 {
